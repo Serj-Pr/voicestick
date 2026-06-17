@@ -3,26 +3,40 @@ import ApplicationServices
 import Foundation
 
 final class InputInjector {
+    private var pendingPasteboardRestore: DispatchWorkItem?
+    private let pasteboardRestoreDelay: TimeInterval = 1.2
+    private let retryPasteDelay: TimeInterval = 0.18
+
     func paste(text: String, pressEnter: Bool) -> Bool {
         guard !text.isEmpty else { return true }
-        guard isAccessibilityTrusted(promptIfNeeded: true) else { return false }
-
-        if insertWithAccessibility(text) {
-            if pressEnter {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                    self.sendReturn()
-                }
-            }
-            return true
+        guard isAccessibilityTrusted(promptIfNeeded: true) else {
+            AppLog.error("InputInjector accessibility not trusted")
+            return false
         }
 
         let pasteboard = NSPasteboard.general
         let previousItems = pasteboard.pasteboardItems?.map(PasteboardItemSnapshot.init)
+        let frontmostApp = NSWorkspace.shared.frontmostApplication
+        let focusedTextBeforePaste = currentFocusedTextSnapshot()
+        pendingPasteboardRestore?.cancel()
 
         pasteboard.prepareForNewContents(with: .currentHostOnly)
         pasteboard.setString(text, forType: .string)
         let temporaryChangeCount = pasteboard.changeCount
+        AppLog.debug("InputInjector pasteboard Command+V text_len=\(text.count)")
         sendCommandV()
+
+        if shouldRetryPaste(for: frontmostApp?.bundleIdentifier) {
+            DispatchQueue.main.asyncAfter(deadline: .now() + retryPasteDelay) {
+                let focusedTextAfterPaste = self.currentFocusedTextSnapshot()
+                guard self.shouldRetryPaste(
+                    before: focusedTextBeforePaste,
+                    after: focusedTextAfterPaste
+                ) else { return }
+                AppLog.debug("InputInjector retrying Command+V")
+                self.sendCommandV()
+            }
+        }
 
         if pressEnter {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
@@ -31,15 +45,20 @@ final class InputInjector {
             }
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+        let restoreWorkItem = DispatchWorkItem {
             guard pasteboard.changeCount == temporaryChangeCount else { return }
 
             pasteboard.prepareForNewContents(with: .currentHostOnly)
             let restoredItems = previousItems?.map(\.pasteboardItem) ?? []
             if !restoredItems.isEmpty {
                 pasteboard.writeObjects(restoredItems)
+            } else {
+                pasteboard.clearContents()
             }
+            AppLog.debug("InputInjector pasteboard restored")
         }
+        pendingPasteboardRestore = restoreWorkItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + pasteboardRestoreDelay, execute: restoreWorkItem)
 
         return true
     }
@@ -49,66 +68,6 @@ final class InputInjector {
             kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: promptIfNeeded
         ] as CFDictionary
         return AXIsProcessTrustedWithOptions(options)
-    }
-
-    private func insertWithAccessibility(_ text: String) -> Bool {
-        let systemWideElement = AXUIElementCreateSystemWide()
-        var focusedValue: CFTypeRef?
-        let focusedResult = AXUIElementCopyAttributeValue(
-            systemWideElement,
-            kAXFocusedUIElementAttribute as CFString,
-            &focusedValue
-        )
-        guard focusedResult == .success, let focusedElement = focusedValue else {
-            return false
-        }
-
-        let element = unsafeBitCast(focusedElement, to: AXUIElement.self)
-        if AXUIElementSetAttributeValue(element, kAXSelectedTextAttribute as CFString, text as CFTypeRef) == .success {
-            return true
-        }
-
-        var valueRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef) == .success,
-              let currentText = valueRef as? String
-        else {
-            return false
-        }
-
-        var selectedRangeRef: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(
-            element,
-            kAXSelectedTextRangeAttribute as CFString,
-            &selectedRangeRef
-        ) == .success,
-           let selectedRangeValue = selectedRangeRef,
-           CFGetTypeID(selectedRangeValue) == AXValueGetTypeID()
-        else {
-            return false
-        }
-
-        var selectedRange = CFRange(location: 0, length: 0)
-        let axValue = unsafeBitCast(selectedRangeValue, to: AXValue.self)
-        AXValueGetValue(axValue, .cfRange, &selectedRange)
-
-        let currentNSString = currentText as NSString
-        guard selectedRange.location >= 0,
-              selectedRange.length >= 0,
-              selectedRange.location + selectedRange.length <= currentNSString.length
-        else {
-            return false
-        }
-
-        let updatedText = currentNSString.replacingCharacters(in: NSRange(location: selectedRange.location, length: selectedRange.length), with: text)
-        guard AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, updatedText as CFTypeRef) == .success else {
-            return false
-        }
-
-        var caretRange = CFRange(location: selectedRange.location + (text as NSString).length, length: 0)
-        if let caretValue = AXValueCreate(.cfRange, &caretRange) {
-            _ = AXUIElementSetAttributeValue(element, kAXSelectedTextRangeAttribute as CFString, caretValue)
-        }
-        return true
     }
 
     private func sendCommandV() {
@@ -143,6 +102,50 @@ final class InputInjector {
         keyDown?.post(tap: .cghidEventTap)
         keyUp?.post(tap: .cghidEventTap)
     }
+
+    private func shouldRetryPaste(for bundleIdentifier: String?) -> Bool {
+        guard let bundleIdentifier else { return false }
+        return bundleIdentifier == "com.openai.codex" || bundleIdentifier == "com.openai.chatgpt"
+    }
+
+    private func shouldRetryPaste(before: FocusedTextSnapshot?, after: FocusedTextSnapshot?) -> Bool {
+        guard
+            let before,
+            let after,
+            before.pid == after.pid,
+            let beforeValue = before.value,
+            let afterValue = after.value
+        else {
+            return false
+        }
+
+        return beforeValue == afterValue
+    }
+
+    private func currentFocusedTextSnapshot() -> FocusedTextSnapshot? {
+        let systemWideElement = AXUIElementCreateSystemWide()
+        var focusedElementValue: CFTypeRef?
+        let result = AXUIElementCopyAttributeValue(
+            systemWideElement,
+            kAXFocusedUIElementAttribute as CFString,
+            &focusedElementValue
+        )
+        guard result == .success, let focusedElement = focusedElementValue else { return nil }
+
+        let axElement = unsafeBitCast(focusedElement, to: AXUIElement.self)
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(axElement, &pid) == .success else { return nil }
+
+        var valueRef: CFTypeRef?
+        let valueResult = AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &valueRef)
+        let value = valueResult == .success ? valueRef as? String : nil
+        return FocusedTextSnapshot(pid: pid, value: value)
+    }
+}
+
+private struct FocusedTextSnapshot {
+    let pid: pid_t
+    let value: String?
 }
 
 private struct PasteboardItemSnapshot {

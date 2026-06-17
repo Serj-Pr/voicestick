@@ -1,5 +1,7 @@
-asr_provider = "volcengine"
-# or: asr_provider = "openai"  # uses llm_api_key for speech-to-text
+asr_provider = "apple_speech"
+# or: asr_provider = "voicestick_cloud"  # requires voicestick_api_key
+# or: asr_provider = "volcengine"        # requires volcengine_api_key
+# or: asr_provider = "openai"            # uses llm_api_key for speech-to-text
 voicestick_api_key = ""
 voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
 volcengine_api_key = "your_volcengine_asr_api_key"
@@ -8,11 +10,13 @@ llm_api_key = "your_openai_compatible_llm_api_key"
 llm_model = "gpt-5.5"
 interaction_mode = "hold_to_talk"
 resource_id = "volc.seedasr.sauc.duration"
+apple_speech_locale = "en_US"
 asr_hotwords = "小智,VoiceStick"
+asr_corrections = ""
 paired_device_ids = ""
 device_theme_colors = ""
 device_overlay_positions = ""
-auto_enter = true
+auto_enter = false
 debug_audio_cache = false
 # debug_audio_dir = "~/Library/Application Support/VoiceStick/DebugAudio"
 

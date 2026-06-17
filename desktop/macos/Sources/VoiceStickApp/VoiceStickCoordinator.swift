@@ -94,6 +94,7 @@ final class VoiceStickCoordinator {
         var finishedFinalText = false
         var waitingForAudioEnd = false
         var audioEndTimeoutTimer: Timer?
+        var recognitionTimeoutTimer: Timer?
 
         init(peripheralID: UUID, deviceID: String?, sessionID: UInt32, config: AppConfig) {
             self.peripheralID = peripheralID
@@ -113,6 +114,7 @@ final class VoiceStickCoordinator {
 
         deinit {
             audioEndTimeoutTimer?.invalidate()
+            recognitionTimeoutTimer?.invalidate()
         }
     }
 
@@ -133,6 +135,8 @@ final class VoiceStickCoordinator {
     private var debugAudioRecorder: DebugAudioRecorder
     private let minimumRecordingDuration: TimeInterval = 0.5
     private let audioEndTimeout: TimeInterval = 1.0
+    private let recordingTimeout: TimeInterval = 12.0
+    private let recognitionTimeout: TimeInterval = 18.0
     private let firmwareManifestCacheDuration: TimeInterval = 24 * 60 * 60
     private let secondaryDoubleClickInterval: TimeInterval = 0.35
 
@@ -144,6 +148,8 @@ final class VoiceStickCoordinator {
     private var pastedFinalText = false
     private var waitingForAudioEnd = false
     private var audioEndTimeoutTimer: Timer?
+    private var recordingTimeoutTimer: Timer?
+    private var recognitionTimeoutTimer: Timer?
     private var pendingPasteState = PendingPasteState.idle
     private var lastRecoverableText: String?
     private var lastRecoverablePeripheralID: UUID?
@@ -184,6 +190,7 @@ final class VoiceStickCoordinator {
             if !connectedDevices.isEmpty {
                 self.statusController.setStatus("Ready")
                 self.ble.sendInteractionMode(self.config.interactionMode)
+                self.ble.sendUIState("ready")
             } else {
                 self.statusController.setStatus(self.pairedDeviceIDs.isEmpty ? "Pair a VoiceStick" : "Ready")
             }
@@ -199,12 +206,20 @@ final class VoiceStickCoordinator {
 
         configureASRCallbacks()
         ble.start()
+        AppLog.debug("VoiceStick coordinator started")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            guard let self else { return }
+            AppLog.debug("VoiceStick startup ready reset")
+            self.ble.sendUIState("ready")
+        }
         checkFirmwareUpdatesIfNeeded(force: false, showErrors: false)
         startFirmwareManifestRefreshTimer()
     }
 
     deinit {
+        recordingTimeoutTimer?.invalidate()
         audioEndTimeoutTimer?.invalidate()
+        recognitionTimeoutTimer?.invalidate()
         firmwareManifestRefreshTimer?.invalidate()
         pendingSecondaryClickActions.values.forEach { $0.cancel() }
     }
@@ -218,9 +233,11 @@ final class VoiceStickCoordinator {
             asr.onError = nil
             asr.onUpgradeURL = nil
             asr.cancel()
+            cancelRecognitionTimeout()
             for cycle in subtitleCycles.values {
                 cycle.asr.cancel()
                 cycle.debugAudioRecorder.discard()
+                cancelSubtitleRecognitionTimeout(cycle)
             }
             subtitleCycles.removeAll()
             activeSubtitleSessions.removeAll()
@@ -531,6 +548,21 @@ final class VoiceStickCoordinator {
             return
         }
         if mainInputState.isBusy {
+            if case .recording(let activeSessionID, let recordingPeripheralID, _) = mainInputState,
+               recordingPeripheralID == peripheralID,
+               let sessionID,
+               sessionID != activeSessionID {
+                AppLog.debug("Preempting stale recording previous_session=\(activeSessionID) next_session=\(sessionID)")
+                cancelRecordingTimeout()
+                bufferedOggChunks.removeAll(keepingCapacity: true)
+                debugAudioRecorder.discard()
+                asr.cancel()
+                asrStarted = false
+                sentFinalAudioChunk = false
+                pastedFinalText = false
+                pendingPasteState = .idle
+                mainInputState = .ready
+            } else {
             if activePeripheralID != peripheralID {
                 ble.sendUIState("ready", to: peripheralID)
             } else if mainInputState.isFinalizing || isWaitingForFinalText {
@@ -538,6 +570,7 @@ final class VoiceStickCoordinator {
             }
             AppLog.debug("Ignoring primary button while main input is busy")
             return
+            }
         }
         guard let sessionID, sessionID != 0 else {
             AppLog.debug("Ignoring primary button down with missing/zero session; sending ready")
@@ -555,6 +588,7 @@ final class VoiceStickCoordinator {
         isShowingASRError = false
         oggMuxer.reset()
         debugAudioRecorder.start(deviceID: deviceID(for: peripheralID), sessionID: sessionID)
+        scheduleRecordingTimeout(sessionID: sessionID, peripheralID: peripheralID)
         statusController.showListening(deviceID: deviceID(for: peripheralID))
         sendUIStateForActiveDevice("recording")
     }
@@ -661,6 +695,53 @@ final class VoiceStickCoordinator {
         waitingForAudioEnd = false
         audioEndTimeoutTimer?.invalidate()
         audioEndTimeoutTimer = nil
+    }
+
+    private func scheduleRecordingTimeout(sessionID: UInt32, peripheralID: UUID) {
+        recordingTimeoutTimer?.invalidate()
+        recordingTimeoutTimer = Timer.scheduledTimer(withTimeInterval: recordingTimeout, repeats: false) { [weak self] _ in
+            guard let self else { return }
+            guard case .recording(sessionID, peripheralID, _) = self.mainInputState else { return }
+            AppLog.error("Recording timeout session=\(sessionID)")
+            self.bufferedOggChunks.removeAll(keepingCapacity: true)
+            self.debugAudioRecorder.discard()
+            self.asr.cancel()
+            self.asrStarted = false
+            self.sentFinalAudioChunk = false
+            self.pastedFinalText = false
+            self.pendingPasteState = .idle
+            self.statusController.hideOverlay()
+            self.statusController.setStatus("Ready")
+            self.ble.sendUIState("ready", to: peripheralID)
+            self.mainInputState = .ready
+        }
+    }
+
+    private func cancelRecordingTimeout() {
+        recordingTimeoutTimer?.invalidate()
+        recordingTimeoutTimer = nil
+    }
+
+    private func scheduleRecognitionTimeout() {
+        recognitionTimeoutTimer?.invalidate()
+        let sessionID = activeSessionID
+        let peripheralID = activePeripheralID
+        recognitionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: recognitionTimeout, repeats: false) { [weak self] _ in
+            guard let self,
+                  self.sentFinalAudioChunk,
+                  self.asrStarted,
+                  !self.pastedFinalText,
+                  self.activeSessionID == sessionID,
+                  self.activePeripheralID == peripheralID
+            else { return }
+            AppLog.error("ASR timeout session=\(sessionID.map(String.init) ?? "nil")")
+            self.finishWithASRError("Speech recognition timed out. Please try again.")
+        }
+    }
+
+    private func cancelRecognitionTimeout() {
+        recognitionTimeoutTimer?.invalidate()
+        recognitionTimeoutTimer = nil
     }
 
     private func handleSubtitlePrimaryButtonDown(sessionID: UInt32?, peripheralID: UUID) {
@@ -787,6 +868,30 @@ final class VoiceStickCoordinator {
         cycle.audioEndTimeoutTimer = nil
     }
 
+    private func scheduleSubtitleRecognitionTimeout(_ cycle: SubtitleCycle) {
+        cycle.recognitionTimeoutTimer?.invalidate()
+        let peripheralID = cycle.peripheralID
+        let sessionID = cycle.sessionID
+        cycle.recognitionTimeoutTimer = Timer.scheduledTimer(withTimeInterval: recognitionTimeout, repeats: false) { [weak self] _ in
+            guard let self,
+                  let cycle = self.subtitleCycle(peripheralID: peripheralID, sessionID: sessionID),
+                  cycle.sentFinalAudioChunk,
+                  !cycle.finishedFinalText
+            else { return }
+            AppLog.error("ASR timeout subtitle VS-\(cycle.deviceID ?? "unknown") session=\(sessionID)")
+            self.finishSubtitleCycleWithError(
+                peripheralID: peripheralID,
+                sessionID: sessionID,
+                message: "Speech recognition timed out. Please try again."
+            )
+        }
+    }
+
+    private func cancelSubtitleRecognitionTimeout(_ cycle: SubtitleCycle) {
+        cycle.recognitionTimeoutTimer?.invalidate()
+        cycle.recognitionTimeoutTimer = nil
+    }
+
     private func sendSubtitleFinalOggChunkIfNeeded(peripheralID: UUID, sessionID: UInt32) {
         guard let cycle = subtitleCycle(peripheralID: peripheralID, sessionID: sessionID),
               !cycle.sentFinalAudioChunk
@@ -802,6 +907,7 @@ final class VoiceStickCoordinator {
         cycle.debugAudioRecorder.append(finalChunk)
         cycle.debugAudioRecorder.finish()
         sendOrBufferSubtitleOggChunk(finalChunk, isLast: true, canStartASR: true, cycle: cycle)
+        scheduleSubtitleRecognitionTimeout(cycle)
     }
 
     private func finishSubtitleAudioInput(_ cycle: SubtitleCycle) {
@@ -874,6 +980,7 @@ final class VoiceStickCoordinator {
         debugAudioRecorder.append(finalChunk)
         debugAudioRecorder.finish()
         sendOrBufferOggChunk(finalChunk, isLast: true, canStartASR: true)
+        scheduleRecognitionTimeout()
         statusController.setStatus("Processing")
         sendUIStateForActiveDevice("thinking")
     }
@@ -944,6 +1051,7 @@ final class VoiceStickCoordinator {
 
     private func finishWithFinalText(_ text: String) {
         guard !pastedFinalText else { return }
+        let text = applyASRCorrections(to: text)
         let profile = outputProfile(for: activeDeviceID)
         if profile.target == .subtitle {
             pastedFinalText = true
@@ -1024,6 +1132,8 @@ final class VoiceStickCoordinator {
               !cycle.finishedFinalText
         else { return }
         cycle.finishedFinalText = true
+        cancelSubtitleRecognitionTimeout(cycle)
+        let text = applyASRCorrections(to: text)
         AppLog.debug("Subtitle final text dev=VS-\(cycle.deviceID ?? "unknown") session=\(sessionID) text_len=\(text.count)")
         let profile = outputProfile(for: cycle.deviceID)
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -1054,6 +1164,7 @@ final class VoiceStickCoordinator {
         cycle.asr.cancel()
         cycle.debugAudioRecorder.discard()
         cancelSubtitleAudioEndTimeout(cycle)
+        cancelSubtitleRecognitionTimeout(cycle)
         clearActiveSubtitleSession(peripheralID: peripheralID, sessionID: sessionID)
         if !hasActiveSubtitleSession(peripheralID: peripheralID) {
             statusController.showError(message, deviceID: cycle.deviceID) { [weak self] in
@@ -1069,6 +1180,7 @@ final class VoiceStickCoordinator {
         cycle.asr.cancel()
         cycle.debugAudioRecorder.discard()
         cancelSubtitleAudioEndTimeout(cycle)
+        cancelSubtitleRecognitionTimeout(cycle)
         statusController.hideOverlay(deviceID: cycle.deviceID)
         ble.sendUIState("ready", to: peripheralID)
         clearActiveSubtitleSession(peripheralID: peripheralID, sessionID: cycle.sessionID)
@@ -1083,6 +1195,7 @@ final class VoiceStickCoordinator {
         if hideOverlay {
             statusController.hideOverlay(deviceID: cycle.deviceID)
         }
+        cancelSubtitleRecognitionTimeout(cycle)
         clearActiveSubtitleSession(peripheralID: peripheralID, sessionID: sessionID)
         if !hasActiveSubtitleSession(peripheralID: peripheralID) {
             statusController.setStatus("Ready")
@@ -1139,6 +1252,7 @@ final class VoiceStickCoordinator {
             cycle.asr.cancel()
             cycle.debugAudioRecorder.discard()
             cancelSubtitleAudioEndTimeout(cycle)
+            cancelSubtitleRecognitionTimeout(cycle)
             subtitleCycles.removeValue(forKey: key)
         }
         statusController.hideOverlay(deviceID: deviceID(for: peripheralID))
@@ -1196,9 +1310,31 @@ final class VoiceStickCoordinator {
         }
     }
 
+    private func applyASRCorrections(to text: String) -> String {
+        guard !config.asrCorrections.isEmpty else { return text }
+        var corrected = text
+        for (from, to) in config.asrCorrections.sorted(by: { $0.key.count > $1.key.count }) {
+            corrected = replaceWholeWord(from, with: to, in: corrected)
+        }
+        if corrected != text {
+            AppLog.debug("ASR corrections applied original_len=\(text.count) corrected_len=\(corrected.count)")
+        }
+        return corrected
+    }
+
+    private func replaceWholeWord(_ from: String, with to: String, in text: String) -> String {
+        let pattern = "(?<![\\p{L}\\p{N}_])\(NSRegularExpression.escapedPattern(for: from))(?![\\p{L}\\p{N}_])"
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else {
+            return text
+        }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: to)
+    }
+
     private func finishWithASRError(_ message: String) {
         AppLog.error("ASR error: \(message)")
         cancelAudioEndTimeout()
+        cancelRecognitionTimeout()
         asr.cancel()
         pendingPasteState = .idle
         debugAudioRecorder.discard()
@@ -1251,6 +1387,7 @@ final class VoiceStickCoordinator {
 
     private func commitPendingPaste(text: String) {
         guard pendingPasteText == text else {
+            AppLog.debug("Paste skipped pending text changed text_len=\(text.count)")
             return
         }
 
@@ -1264,8 +1401,12 @@ final class VoiceStickCoordinator {
         statusController.setStatus("Ready")
         sendUIStateForActiveDevice("ready")
         mainInputState = .ready
-        if !inputInjector.paste(text: text, pressEnter: shouldPressEnter) {
-            statusController.showError("Allow Accessibility permission for VoiceStick")
+        AppLog.debug("Paste attempt text_len=\(text.count) press_enter=\(shouldPressEnter)")
+        if inputInjector.paste(text: text, pressEnter: shouldPressEnter) {
+            AppLog.debug("Paste accepted text_len=\(text.count)")
+        } else {
+            AppLog.error("Paste failed accessibility_not_trusted_or_no_focused_element text_len=\(text.count)")
+            statusController.showError("Allow Accessibility permission for VoiceStick. If an old VoiceStick entry is already listed, remove the old permission first, then allow the current app.")
         }
     }
 
@@ -1392,6 +1533,7 @@ final class VoiceStickCoordinator {
 
     private func finishRecognitionCycle() {
         cancelAudioEndTimeout()
+        cancelRecognitionTimeout()
         asrStarted = false
         sentFinalAudioChunk = false
         pastedFinalText = false
@@ -1566,6 +1708,8 @@ final class VoiceStickCoordinator {
             return ASRWebSocketClient(config: config)
         case .openai:
             return OpenAITranscriptionClient(config: config)
+        case .appleSpeech:
+            return AppleSpeechTranscriptionClient(config: config)
         }
     }
 

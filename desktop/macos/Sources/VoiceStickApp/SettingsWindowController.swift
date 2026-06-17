@@ -5,8 +5,11 @@ final class SettingsWindowController: NSWindowController {
     private let apiKeyField = NSTextField()
     private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
     private let resourcePopup = NSPopUpButton()
+    private let appleSpeechLocalePopup = NSPopUpButton()
     private let hotwordsTextView = NSTextView()
     private let hotwordsScrollView = NSScrollView()
+    private let correctionsTextView = NSTextView()
+    private let correctionsScrollView = NSScrollView()
     private let llmBaseURLField = NSTextField()
     private let llmAPIKeyField = NSTextField()
     private let llmModelField = NSTextField()
@@ -16,6 +19,8 @@ final class SettingsWindowController: NSWindowController {
     private var currentDisplayedProvider: ASRProvider = .volcengine
     private var isSyncingOpenAIAPIKeyFields = false
     private var resourceRow: NSStackView?
+    private var appleSpeechLocaleRow: NSStackView?
+    private var apiKeyRow: NSStackView?
     var onConfigChanged: ((AppConfig) -> Void)?
 
     private var config: AppConfig
@@ -23,7 +28,7 @@ final class SettingsWindowController: NSWindowController {
     init(config: AppConfig = AppConfig.load()) {
         self.config = config
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 560),
+            contentRect: NSRect(x: 0, y: 0, width: 560, height: 600),
             styleMask: [.titled, .closable, .miniaturizable],
             backing: .buffered,
             defer: false
@@ -78,14 +83,23 @@ final class SettingsWindowController: NSWindowController {
         configureProviderPopup()
         stack.addArrangedSubview(row(label: "Provider", control: providerPopup))
         configureApplyTrialAPIKeyButton()
-        stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
+        let apiKeyRow = row(label: "API Key", control: apiKeyControl())
+        self.apiKeyRow = apiKeyRow
+        stack.addArrangedSubview(apiKeyRow)
         configureResourcePopup()
         let resourceRow = row(label: "Resource ID", control: resourcePopup)
         self.resourceRow = resourceRow
         stack.addArrangedSubview(resourceRow)
+        configureAppleSpeechLocalePopup()
+        let appleSpeechLocaleRow = row(label: "Apple Language", control: appleSpeechLocalePopup)
+        self.appleSpeechLocaleRow = appleSpeechLocaleRow
+        stack.addArrangedSubview(appleSpeechLocaleRow)
         configureHotwordsTextView()
         stack.addArrangedSubview(row(label: "Hotwords", control: hotwordsScrollView))
         stack.addArrangedSubview(hintRow("Separate hotwords with commas or new lines."))
+        configureCorrectionsTextView()
+        stack.addArrangedSubview(row(label: "Corrections", control: correctionsScrollView))
+        stack.addArrangedSubview(hintRow("Use mistake=>correction, one per line. Example: ноги=>логи"))
 
         stack.addArrangedSubview(sectionTitle("LLM"))
         stack.addArrangedSubview(row(label: "Base URL", control: llmBaseURLField))
@@ -140,10 +154,19 @@ final class SettingsWindowController: NSWindowController {
         providerPopup.addItems(withTitles: [
             ASRProvider.voiceStickCloud.displayName,
             ASRProvider.volcengine.displayName,
-            ASRProvider.openai.displayName
+            ASRProvider.openai.displayName,
+            ASRProvider.appleSpeech.displayName
         ])
         providerPopup.target = self
         providerPopup.action = #selector(providerSelectionChanged)
+    }
+
+    private func configureAppleSpeechLocalePopup() {
+        appleSpeechLocalePopup.removeAllItems()
+        for option in AppConfig.appleSpeechLocaleOptions {
+            appleSpeechLocalePopup.addItem(withTitle: option.title)
+            appleSpeechLocalePopup.lastItem?.representedObject = option.code
+        }
     }
 
     private func configureApplyTrialAPIKeyButton() {
@@ -164,31 +187,39 @@ final class SettingsWindowController: NSWindowController {
     }
 
     private func configureHotwordsTextView() {
-        hotwordsScrollView.hasVerticalScroller = true
-        hotwordsScrollView.borderType = .bezelBorder
-        hotwordsScrollView.heightAnchor.constraint(equalToConstant: 78).isActive = true
-        hotwordsScrollView.translatesAutoresizingMaskIntoConstraints = false
+        configureMultilineTextView(hotwordsTextView, in: hotwordsScrollView, height: 78)
+    }
 
-        hotwordsTextView.isRichText = false
-        hotwordsTextView.isEditable = true
-        hotwordsTextView.isSelectable = true
-        hotwordsTextView.font = .systemFont(ofSize: 13)
-        hotwordsTextView.textColor = .textColor
-        hotwordsTextView.backgroundColor = .textBackgroundColor
-        hotwordsTextView.drawsBackground = true
-        hotwordsTextView.textContainerInset = NSSize(width: 4, height: 4)
-        hotwordsTextView.minSize = NSSize(width: 0, height: hotwordsScrollView.contentSize.height)
-        hotwordsTextView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        hotwordsTextView.isVerticallyResizable = true
-        hotwordsTextView.isHorizontallyResizable = false
-        hotwordsTextView.autoresizingMask = [.width]
-        hotwordsTextView.frame = NSRect(origin: .zero, size: NSSize(width: 300, height: 78))
-        hotwordsTextView.textContainer?.containerSize = NSSize(
-            width: hotwordsTextView.frame.width,
+    private func configureCorrectionsTextView() {
+        configureMultilineTextView(correctionsTextView, in: correctionsScrollView, height: 78)
+    }
+
+    private func configureMultilineTextView(_ textView: NSTextView, in scrollView: NSScrollView, height: CGFloat) {
+        scrollView.hasVerticalScroller = true
+        scrollView.borderType = .bezelBorder
+        scrollView.heightAnchor.constraint(equalToConstant: height).isActive = true
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+
+        textView.isRichText = false
+        textView.isEditable = true
+        textView.isSelectable = true
+        textView.font = .systemFont(ofSize: 13)
+        textView.textColor = .textColor
+        textView.backgroundColor = .textBackgroundColor
+        textView.drawsBackground = true
+        textView.textContainerInset = NSSize(width: 4, height: 4)
+        textView.minSize = NSSize(width: 0, height: scrollView.contentSize.height)
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.frame = NSRect(origin: .zero, size: NSSize(width: 300, height: height))
+        textView.textContainer?.containerSize = NSSize(
+            width: textView.frame.width,
             height: CGFloat.greatestFiniteMagnitude
         )
-        hotwordsTextView.textContainer?.widthTracksTextView = true
-        hotwordsScrollView.documentView = hotwordsTextView
+        textView.textContainer?.widthTracksTextView = true
+        scrollView.documentView = textView
     }
 
     private func loadConfigIntoFields() {
@@ -196,9 +227,11 @@ final class SettingsWindowController: NSWindowController {
         providerPopup.selectItem(withTitle: config.asrProvider.displayName)
         apiKeyField.stringValue = apiKey(for: config.asrProvider)
         hotwordsTextView.string = config.asrHotwords.joined(separator: ",")
+        correctionsTextView.string = config.correctionText
         llmBaseURLField.stringValue = config.llmBaseURL
         llmAPIKeyField.stringValue = config.llmAPIKey
         llmModelField.stringValue = config.llmModel
+        selectAppleSpeechLocale(config.appleSpeechLocale)
         debugAudioButton.state = config.debugAudioCache ? .on : .off
         debugAudioDirectoryField.stringValue = config.debugAudioDirectory.path
 
@@ -296,7 +329,9 @@ final class SettingsWindowController: NSWindowController {
             llmModel: llmModelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines),
             interactionMode: config.interactionMode,
             resourceID: resourceID,
+            appleSpeechLocale: selectedAppleSpeechLocale(),
             asrHotwords: AppConfig.hotwordList(hotwordsTextView.string),
+            asrCorrections: AppConfig.correctionMap(correctionsTextView.string),
             pairedDeviceIDs: config.pairedDeviceIDs,
             deviceThemeColors: config.deviceThemeColors,
             deviceOverlayPositions: config.deviceOverlayPositions,
@@ -330,6 +365,8 @@ final class SettingsWindowController: NSWindowController {
             return .volcengine
         case ASRProvider.openai.displayName:
             return .openai
+        case ASRProvider.appleSpeech.displayName:
+            return .appleSpeech
         default:
             return config.asrProvider
         }
@@ -343,7 +380,25 @@ final class SettingsWindowController: NSWindowController {
             return config.volcengineAPIKey
         case .openai:
             return config.llmAPIKey
+        case .appleSpeech:
+            return ""
         }
+    }
+
+    private func selectedAppleSpeechLocale() -> String {
+        (appleSpeechLocalePopup.selectedItem?.representedObject as? String) ?? AppConfig.defaults.appleSpeechLocale
+    }
+
+    private func selectAppleSpeechLocale(_ code: String) {
+        if let item = appleSpeechLocalePopup.itemArray.first(where: { ($0.representedObject as? String) == code }) {
+            appleSpeechLocalePopup.select(item)
+            return
+        }
+
+        let title = Locale.current.localizedString(forIdentifier: code) ?? code
+        appleSpeechLocalePopup.addItem(withTitle: "\(title) (\(code))")
+        appleSpeechLocalePopup.lastItem?.representedObject = code
+        appleSpeechLocalePopup.select(appleSpeechLocalePopup.lastItem)
     }
 
     private func saveDisplayedAPIKey() {
@@ -355,11 +410,15 @@ final class SettingsWindowController: NSWindowController {
             config.volcengineAPIKey = value
         case .openai:
             config.llmAPIKey = value
+        case .appleSpeech:
+            break
         }
     }
 
     private func updateProviderRows() {
         resourceRow?.isHidden = currentDisplayedProvider != .volcengine
+        appleSpeechLocaleRow?.isHidden = currentDisplayedProvider != .appleSpeech
+        apiKeyRow?.isHidden = currentDisplayedProvider == .appleSpeech
         updateApplyTrialButton()
     }
 

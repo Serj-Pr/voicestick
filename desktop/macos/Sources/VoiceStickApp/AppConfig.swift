@@ -6,6 +6,7 @@ enum ASRProvider: String {
     case voiceStickCloud = "voicestick_cloud"
     case volcengine
     case openai
+    case appleSpeech = "apple_speech"
 
     var displayName: String {
         switch self {
@@ -15,6 +16,8 @@ enum ASRProvider: String {
             return "Volcengine"
         case .openai:
             return "OpenAI"
+        case .appleSpeech:
+            return "Apple Speech"
         }
     }
 }
@@ -126,6 +129,11 @@ struct OutputProfile: Equatable {
     }
 }
 
+struct AppleSpeechLocaleOption {
+    let code: String
+    let title: String
+}
+
 struct AppConfig {
     var asrProvider: ASRProvider
     var voiceStickAPIKey: String
@@ -136,7 +144,9 @@ struct AppConfig {
     var llmModel: String
     var interactionMode: InteractionMode
     var resourceID: String
+    var appleSpeechLocale: String
     var asrHotwords: [String]
+    var asrCorrections: [String: String]
     var pairedDeviceIDs: [String]
     var deviceThemeColors: [String: OverlayThemeColor]
     var deviceOverlayPositions: [String: OverlayPosition]
@@ -166,6 +176,24 @@ struct AppConfig {
         "volc.bigasr.sauc.duration",
         "volc.bigasr.sauc.concurrent"
     ]
+    static let appleSpeechLocaleOptions = [
+        AppleSpeechLocaleOption(code: "en_US", title: "English (United States)"),
+        AppleSpeechLocaleOption(code: "en_GB", title: "English (United Kingdom)"),
+        AppleSpeechLocaleOption(code: "ru_RU", title: "Russian"),
+        AppleSpeechLocaleOption(code: "kk_KZ", title: "Kazakh"),
+        AppleSpeechLocaleOption(code: "uk_UA", title: "Ukrainian"),
+        AppleSpeechLocaleOption(code: "de_DE", title: "German"),
+        AppleSpeechLocaleOption(code: "fr_FR", title: "French"),
+        AppleSpeechLocaleOption(code: "es_ES", title: "Spanish"),
+        AppleSpeechLocaleOption(code: "it_IT", title: "Italian"),
+        AppleSpeechLocaleOption(code: "pt_BR", title: "Portuguese (Brazil)"),
+        AppleSpeechLocaleOption(code: "tr_TR", title: "Turkish"),
+        AppleSpeechLocaleOption(code: "pl_PL", title: "Polish"),
+        AppleSpeechLocaleOption(code: "zh_CN", title: "Chinese (Simplified)"),
+        AppleSpeechLocaleOption(code: "zh_TW", title: "Chinese (Traditional)"),
+        AppleSpeechLocaleOption(code: "ja_JP", title: "Japanese"),
+        AppleSpeechLocaleOption(code: "ko_KR", title: "Korean")
+    ]
 
     static let defaultVoiceStickCloudURL = "wss://api.xiaozhi.me/voicestick/asr/"
     static let volcengineWebSocketURL = "wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async"
@@ -179,9 +207,13 @@ struct AppConfig {
         FileManager.default.fileExists(atPath: configURL.path)
     }
 
+    static var defaultAppleSpeechLocale: String {
+        normalizedAppleSpeechLocaleCode(Locale.preferredLanguages.first ?? Locale.current.identifier)
+    }
+
     static var defaults: AppConfig {
         AppConfig(
-            asrProvider: .voiceStickCloud,
+            asrProvider: .appleSpeech,
             voiceStickAPIKey: "",
             voiceStickCloudURL: defaultVoiceStickCloudURL,
             volcengineAPIKey: "",
@@ -190,13 +222,15 @@ struct AppConfig {
             llmModel: "gpt-5.5",
             interactionMode: .holdToTalk,
             resourceID: supportedResourceIDs[0],
+            appleSpeechLocale: defaultAppleSpeechLocale,
             asrHotwords: [],
+            asrCorrections: [:],
             pairedDeviceIDs: [],
             deviceThemeColors: [:],
             deviceOverlayPositions: [:],
             defaultOutputProfile: .default,
             deviceOutputProfiles: [:],
-            autoEnter: true,
+            autoEnter: false,
             debugAudioCache: false,
             debugAudioDirectory: defaultDebugAudioDirectory
         )
@@ -223,7 +257,9 @@ struct AppConfig {
             llmModel: file.llm_model ?? defaults.llmModel,
             interactionMode: interactionModeValue(file.interaction_mode, default: defaults.interactionMode),
             resourceID: resourceIDValue(file.resource_id, default: defaults.resourceID),
+            appleSpeechLocale: localeValue(file.apple_speech_locale, default: defaults.appleSpeechLocale),
             asrHotwords: hotwordList(file.asr_hotwords ?? ""),
+            asrCorrections: correctionMap(file.asr_corrections ?? ""),
             pairedDeviceIDs: deviceIDList(file.paired_device_ids ?? ""),
             deviceThemeColors: deviceThemeColorMap(file.device_theme_colors ?? ""),
             deviceOverlayPositions: deviceOverlayPositionMap(file.device_overlay_positions ?? ""),
@@ -261,7 +297,9 @@ struct AppConfig {
         llm_model = "\(llmModel.tomlEscaped)"
         interaction_mode = "\(interactionMode.rawValue)"
         resource_id = "\(resourceID.tomlEscaped)"
+        apple_speech_locale = "\(appleSpeechLocale.tomlEscaped)"
         asr_hotwords = "\(asrHotwords.joined(separator: ",").tomlEscaped)"
+        asr_corrections = "\(correctionText.tomlEscaped)"
         paired_device_ids = "\(pairedDeviceIDs.joined(separator: ",").tomlEscaped)"
         device_theme_colors = "\(deviceThemeColorText.tomlEscaped)"
         device_overlay_positions = "\(deviceOverlayPositionText.tomlEscaped)"
@@ -301,7 +339,9 @@ struct AppConfig {
             llmModel: values["llm_model"] ?? defaults.llmModel,
             interactionMode: interactionModeValue(values["interaction_mode"], default: defaults.interactionMode),
             resourceID: resourceIDValue(values["resource_id"], default: defaults.resourceID),
+            appleSpeechLocale: localeValue(values["apple_speech_locale"], default: defaults.appleSpeechLocale),
             asrHotwords: hotwordList(values["asr_hotwords"] ?? ""),
+            asrCorrections: correctionMap(values["asr_corrections"] ?? ""),
             pairedDeviceIDs: deviceIDList(values["paired_device_ids"] ?? ""),
             deviceThemeColors: deviceThemeColorMap(values["device_theme_colors"] ?? ""),
             deviceOverlayPositions: deviceOverlayPositionMap(values["device_overlay_positions"] ?? ""),
@@ -386,6 +426,16 @@ struct AppConfig {
         return text
     }
 
+    private static func localeValue(_ text: String?, default defaultValue: String) -> String {
+        guard let text else { return defaultValue }
+        let trimmed = normalizedAppleSpeechLocaleCode(text.trimmingCharacters(in: .whitespacesAndNewlines))
+        return trimmed.isEmpty ? defaultValue : trimmed
+    }
+
+    private static func normalizedAppleSpeechLocaleCode(_ text: String) -> String {
+        text.replacingOccurrences(of: "-", with: "_")
+    }
+
     static func normalizedDeviceID(_ text: String) -> String {
         let upper = text.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
         if upper.hasPrefix("VS-") {
@@ -415,6 +465,21 @@ struct AppConfig {
                 if !hotwords.contains(hotword) {
                     hotwords.append(hotword)
                 }
+            }
+    }
+
+    static func correctionMap(_ text: String) -> [String: String] {
+        text.split { character in
+            character == "," || character == "\n" || character == "\r"
+        }
+            .reduce(into: [:]) { corrections, rawPair in
+                let pair = String(rawPair)
+                let parts = pair.components(separatedBy: "=>")
+                guard parts.count == 2 else { return }
+                let from = parts[0].trimmingCharacters(in: .whitespacesAndNewlines)
+                let to = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                guard !from.isEmpty, !to.isEmpty else { return }
+                corrections[from] = to
             }
     }
 
@@ -515,6 +580,13 @@ struct AppConfig {
             .joined(separator: "\n")
     }
 
+    var correctionText: String {
+        asrCorrections
+            .sorted { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }
+            .map { "\($0.key)=>\($0.value)" }
+            .joined(separator: ",")
+    }
+
 }
 
 private struct ConfigFile: Decodable {
@@ -531,7 +603,9 @@ private struct ConfigFile: Decodable {
     var text_transform: String?
     var translation_target: String?
     var resource_id: String?
+    var apple_speech_locale: String?
     var asr_hotwords: String?
+    var asr_corrections: String?
     var paired_device_ids: String?
     var device_theme_colors: String?
     var device_overlay_positions: String?

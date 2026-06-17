@@ -14,7 +14,7 @@ For an ARM-only app bundle, use:
 ./build-macos-arm-release.sh --debug
 ```
 
-The release script creates `build/VoiceStick-<version>.app` and does not install it into `/Applications`.
+The release script creates `build/VoiceStick.app` and does not install it into `/Applications`.
 
 ## Configuration
 
@@ -25,6 +25,8 @@ The app stores its config at:
 ```
 
 OpenAI speech-to-text uses `llm_api_key`, the same key used by translation. During first-run setup, choosing OpenAI as the ASR provider saves the entered key for both OpenAI ASR and translation.
+
+Apple Speech is also available as a native macOS provider. It uses the system Speech framework and does not require an API key.
 
 ## macOS Permissions
 
@@ -72,7 +74,7 @@ swift build -c debug --arch arm64
 ./build-macos-arm-release.sh --debug
 ```
 
-Скрипт создаёт `build/VoiceStick-<version>.app` и сам не устанавливает приложение в `/Applications`.
+Скрипт создаёт `build/VoiceStick.app` и сам не устанавливает приложение в `/Applications`.
 
 ### Конфигурация
 
@@ -83,6 +85,8 @@ swift build -c debug --arch arm64
 ```
 
 OpenAI speech-to-text использует `llm_api_key`, то есть тот же ключ, что и переводчик. При первичной настройке, если выбрать OpenAI как ASR-провайдер, введённый ключ сохраняется сразу и для распознавания, и для перевода.
+
+Apple Speech тоже доступен как родной macOS-провайдер. Он использует системный Speech framework и не требует API-ключа.
 
 ### Права macOS
 

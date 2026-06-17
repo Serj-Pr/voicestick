@@ -141,6 +141,8 @@ final class ASRWebSocketClient: ASRClient {
             return config.volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         case .openai:
             return config.llmAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .appleSpeech:
+            return ""
         }
     }
 
@@ -152,6 +154,8 @@ final class ASRWebSocketClient: ASRClient {
             return AppConfig.volcengineWebSocketURL
         case .openai:
             return config.llmBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .appleSpeech:
+            return ""
         }
     }
 

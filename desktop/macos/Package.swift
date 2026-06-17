@@ -19,6 +19,7 @@ let package = Package(
             name: "VoiceStickApp",
             dependencies: [
                 "CZlib",
+                "COpus",
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "TOMLKit", package: "TOMLKit"),
             ],
@@ -30,13 +31,27 @@ let package = Package(
                     "-Xlinker", "__TEXT",
                     "-Xlinker", "__info_plist",
                     "-Xlinker", "Sources/VoiceStickApp/Info.plist",
-                ])
+                    "-Xlinker", "-rpath",
+                    "-Xlinker", "/opt/homebrew/opt/opus/lib",
+                    "-L/opt/homebrew/opt/opus/lib",
+                ]),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("Speech"),
+                .linkedLibrary("opus")
             ]
         ),
         .target(
             name: "CZlib",
             path: "Sources/CZlib",
             publicHeadersPath: "."
+        ),
+        .systemLibrary(
+            name: "COpus",
+            path: "Sources/COpus",
+            providers: [
+                .brew(["opus"])
+            ]
         )
     ]
 )

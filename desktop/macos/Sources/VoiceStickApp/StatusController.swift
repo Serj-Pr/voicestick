@@ -110,6 +110,8 @@ final class StatusController {
     private var autoEnter: Bool
     private var defaultOutputProfile: OutputProfile
     private var deviceOutputProfiles: [String: OutputProfile]
+    private var needsDictationSettings = false
+    private var needsAccessibilitySettings = false
 
     init(pairedDeviceIDs: [String] = [],
          deviceThemeColors: [String: OverlayThemeColor] = [:],
@@ -195,6 +197,29 @@ final class StatusController {
 
     private func rebuildMenu() {
         menu.removeAllItems()
+        if needsAccessibilitySettings {
+            menu.addItem(makeMenuItem(
+                title: "Open Accessibility Settings...",
+                symbolName: "accessibility",
+                action: #selector(openAccessibilitySettings)
+            ))
+            menu.addItem(makeMenuItem(
+                title: "Remove Old VoiceStick Permission...",
+                symbolName: "arrow.counterclockwise",
+                action: #selector(resetAccessibilityPermission)
+            ))
+            menu.addItem(NSMenuItem.separator())
+        }
+
+        if needsDictationSettings {
+            menu.addItem(makeMenuItem(
+                title: "Open Dictation Settings...",
+                symbolName: "keyboard",
+                action: #selector(openDictationSettings)
+            ))
+            menu.addItem(NSMenuItem.separator())
+        }
+
         if hasRecoverableInput {
             menu.addItem(makeMenuItem(
                 title: "Restore Last Input",
@@ -533,6 +558,14 @@ final class StatusController {
     }
 
     func showError(_ text: String, deviceID: String? = nil, onHidden: (() -> Void)? = nil) {
+        let requiresDictation = Self.isDictationSettingsError(text)
+        let requiresAccessibility = Self.isAccessibilitySettingsError(text)
+        if needsDictationSettings != requiresDictation ||
+            needsAccessibilitySettings != requiresAccessibility {
+            needsDictationSettings = requiresDictation
+            needsAccessibilitySettings = requiresAccessibility
+            rebuildMenu()
+        }
         setStatus("ASR error: \(text)")
         let overlay = overlay(for: deviceID)
         markOverlayVisible(for: deviceID)
@@ -607,6 +640,34 @@ final class StatusController {
         image?.isTemplate = true
         image?.size = NSSize(width: 16, height: 16)
         return image
+    }
+
+    private static func isDictationSettingsError(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        return normalized.contains("apple speech") &&
+            normalized.contains("dictation") &&
+            normalized.contains("turned off")
+    }
+
+    private static func isAccessibilitySettingsError(_ text: String) -> Bool {
+        let normalized = text.lowercased()
+        return normalized.contains("accessibility") ||
+            normalized.contains("universal access") ||
+            normalized.contains("универсаль")
+    }
+
+    private static func openSystemSettings(urls: [String], fallbackMessage: String? = nil) {
+        for urlText in urls {
+            guard let url = URL(string: urlText) else { continue }
+            if NSWorkspace.shared.open(url) {
+                return
+            }
+        }
+        if let fallbackMessage {
+            NSAlert(error: NSError(domain: "VoiceStick", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: fallbackMessage
+            ])).runModal()
+        }
     }
 
     private static let translationTargets: [(code: String, name: String)] = [
@@ -700,6 +761,49 @@ final class StatusController {
 
     @objc private func openSettings() {
         onOpenSettings?()
+    }
+
+    @objc private func openDictationSettings() {
+        Self.openSystemSettings(
+            urls: [
+                "x-apple.systempreferences:com.apple.Keyboard-Settings.extension?Dictation",
+                "x-apple.systempreferences:com.apple.preference.keyboard?Dictation"
+            ],
+            fallbackMessage: "Open System Settings, then go to Keyboard > Dictation and turn Dictation on."
+        )
+    }
+
+    @objc private func openAccessibilitySettings() {
+        Self.openSystemSettings(
+            urls: [
+                "x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?Privacy_Accessibility",
+                "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+            ],
+            fallbackMessage: "Open System Settings, then go to Privacy & Security > Accessibility."
+        )
+    }
+
+    @objc private func resetAccessibilityPermission() {
+        let alert = NSAlert()
+        alert.messageText = "Reset Accessibility Permission?"
+        alert.informativeText = """
+        This removes VoiceStick from macOS Accessibility permissions. After that, open Accessibility Settings and allow the currently installed VoiceStick.app again.
+        """
+        alert.addButton(withTitle: "Reset")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let bundleID = Bundle.main.bundleIdentifier ?? "app.voicestick.mac"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", "Accessibility", bundleID]
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+        openAccessibilitySettings()
     }
 
     @objc private func pairDevice() {

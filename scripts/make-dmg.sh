@@ -3,8 +3,12 @@
 #
 # Usage:
 #   scripts/make-dmg.sh
-#   scripts/make-dmg.sh build/VoiceStick-<version>.app
-#   scripts/make-dmg.sh build/VoiceStick-<version>.app build/VoiceStick-<version>.dmg
+#   scripts/make-dmg.sh build/VoiceStick.app
+#   scripts/make-dmg.sh build/VoiceStick.app build/VoiceStick-<version>.dmg
+#
+# Optional environment:
+#   ALLOW_ADHOC_RELEASE=1      allow a local ad-hoc signed DMG
+#   ALLOW_UNNOTARIZED_DMG=1    allow a local DMG without Apple notarization
 
 set -euo pipefail
 
@@ -12,10 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$SCRIPT_DIR/.."
 BUILD_DIR="$ROOT_DIR/build"
 VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
-APP_PATH="${1:-$BUILD_DIR/VoiceStick-${VERSION}.app}"
+APP_PATH="${1:-$BUILD_DIR/VoiceStick.app}"
 OUTPUT="${2:-$BUILD_DIR/VoiceStick-${VERSION}.dmg}"
 STAGING_DIR="$BUILD_DIR/.dmg-staging"
 VOLUME_NAME="VoiceStick"
+ENTITLEMENTS="$ROOT_DIR/desktop/macos/Resources/VoiceStick.entitlements"
 
 if [ ! -d "$APP_PATH" ]; then
     echo "Error: Application bundle not found: $APP_PATH"
@@ -27,14 +32,21 @@ if security find-identity -v -p codesigning 2>/dev/null | grep -q "Developer ID 
     CODESIGN_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')"
 fi
 
+if [ "$CODESIGN_IDENTITY" = "-" ] && [ "${ALLOW_ADHOC_RELEASE:-0}" != "1" ]; then
+    echo "Error: Developer ID Application signing identity was not found."
+    echo "       A public DMG must be Developer ID signed so users can open it without workarounds."
+    echo "       For local testing only, rerun with ALLOW_ADHOC_RELEASE=1."
+    exit 1
+fi
+
 echo "Signing app before DMG packaging..."
 xattr -cr "$APP_PATH" 2>/dev/null || true
 if [ "$CODESIGN_IDENTITY" != "-" ]; then
     echo "Using: $CODESIGN_IDENTITY"
-    codesign --deep --force --options runtime --sign "$CODESIGN_IDENTITY" "$APP_PATH"
+    codesign --deep --force --options runtime --entitlements "$ENTITLEMENTS" --sign "$CODESIGN_IDENTITY" "$APP_PATH"
 else
     echo "Using ad-hoc signature."
-    codesign --deep --force --options runtime --sign - "$APP_PATH"
+    codesign --deep --force --options runtime --entitlements "$ENTITLEMENTS" --sign - "$APP_PATH"
 fi
 
 echo "Verifying app signature..."
@@ -59,7 +71,14 @@ if xcrun notarytool history --keychain-profile "AC_PASSWORD" >/dev/null 2>&1; th
     xcrun notarytool submit "$OUTPUT" --keychain-profile "AC_PASSWORD" --wait
     xcrun stapler staple "$OUTPUT"
 else
-    echo "Skipping notarization: keychain profile AC_PASSWORD was not found."
+    if [ "${ALLOW_UNNOTARIZED_DMG:-0}" = "1" ]; then
+        echo "Skipping notarization: keychain profile AC_PASSWORD was not found."
+    else
+        echo "Error: notarization keychain profile AC_PASSWORD was not found."
+        echo "       A public DMG must be notarized so Gatekeeper accepts it normally."
+        echo "       For local testing only, rerun with ALLOW_UNNOTARIZED_DMG=1."
+        exit 1
+    fi
 fi
 
 echo "DMG complete: $OUTPUT"

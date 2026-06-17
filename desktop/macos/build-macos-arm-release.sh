@@ -3,7 +3,7 @@
 # conveniences from the install script, but without installing to /Applications.
 #
 # Produces:
-#   ../../build/VoiceStick-<version>.app
+#   ../../build/VoiceStick.app
 #   ../../build/VoiceStick-<version>.zip
 #   ../../build/VoiceStick-<version>.signature  (when Sparkle sign_update is available)
 #
@@ -12,6 +12,7 @@
 #   SPARKLE_PUBLIC_ED_KEY=<public key from Sparkle generate_keys>
 #   SPARKLE_PRIVATE_ED_KEY=<private key exported by Sparkle generate_keys -x>
 #   SPARKLE_KEY_ACCOUNT=voicestick
+#   VOICESTICK_OPUS_PREFIX=/opt/homebrew/opt/opus
 #   ALLOW_ADHOC_RELEASE=1
 
 set -euo pipefail
@@ -28,6 +29,7 @@ VERSION="$(tr -d '[:space:]' < "$ROOT_DIR/VERSION")"
 CONFIG="${1:---release}"
 TARGET_ARCHS="arm64"
 SPARKLE_KEY_ACCOUNT="${SPARKLE_KEY_ACCOUNT:-voicestick}"
+OPUS_PREFIX="${VOICESTICK_OPUS_PREFIX:-}"
 
 case "$CONFIG" in
     --release)
@@ -45,6 +47,13 @@ esac
 if [ -z "$VERSION" ]; then
     echo "Error: VERSION is empty"
     exit 1
+fi
+
+if [ -z "$OPUS_PREFIX" ] && command -v brew >/dev/null 2>&1; then
+    OPUS_PREFIX="$(brew --prefix opus 2>/dev/null || true)"
+fi
+if [ -z "$OPUS_PREFIX" ]; then
+    OPUS_PREFIX="/opt/homebrew/opt/opus"
 fi
 
 mkdir -p "$BUILD_DIR"
@@ -78,8 +87,8 @@ swift build \
     --disable-sandbox \
     --scratch-path "$SCRATCH_DIR"
 
-APP_DIR="$BUILD_DIR/VoiceStick-${VERSION}.app"
-rm -rf "$APP_DIR"
+APP_DIR="$BUILD_DIR/VoiceStick.app"
+rm -rf "$APP_DIR" "$BUILD_DIR"/VoiceStick-*.app
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources" "$APP_DIR/Contents/Frameworks"
 
 ARM_BUILD="$SCRATCH_DIR/arm64-apple-macosx/$SWIFT_CONFIG"
@@ -87,6 +96,22 @@ ARM_BUILD="$SCRATCH_DIR/arm64-apple-macosx/$SWIFT_CONFIG"
 echo ""
 echo "Copying ARM executable..."
 cp "$ARM_BUILD/VoiceStickApp" "$APP_DIR/Contents/MacOS/VoiceStickApp"
+
+OPUS_DYLIB="$OPUS_PREFIX/lib/libopus.0.dylib"
+if [ -f "$OPUS_DYLIB" ]; then
+    echo "Bundling libopus..."
+    cp "$OPUS_DYLIB" "$APP_DIR/Contents/Frameworks/libopus.0.dylib"
+    install_name_tool -id "@rpath/libopus.0.dylib" "$APP_DIR/Contents/Frameworks/libopus.0.dylib"
+    install_name_tool -change "$OPUS_DYLIB" "@rpath/libopus.0.dylib" "$APP_DIR/Contents/MacOS/VoiceStickApp"
+    install_name_tool -add_rpath "@loader_path/../Frameworks" "$APP_DIR/Contents/MacOS/VoiceStickApp" 2>/dev/null || true
+    install_name_tool -delete_rpath "$OPUS_PREFIX/lib" "$APP_DIR/Contents/MacOS/VoiceStickApp" 2>/dev/null || true
+    install_name_tool -delete_rpath "/opt/homebrew/opt/opus/lib" "$APP_DIR/Contents/MacOS/VoiceStickApp" 2>/dev/null || true
+else
+    echo "Error: libopus was not found at $OPUS_DYLIB"
+    echo "       Install it with: brew install opus"
+    echo "       Or set VOICESTICK_OPUS_PREFIX to an Opus install prefix."
+    exit 1
+fi
 
 BUNDLE_PLIST="$APP_DIR/Contents/Info.plist"
 cp "$SOURCE_PLIST" "$BUNDLE_PLIST"

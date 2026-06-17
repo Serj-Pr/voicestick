@@ -2,7 +2,7 @@
 
 Voice Stick turns an M5Stack StickS3 into a Bluetooth push-to-talk input device for macOS.
 
-Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text and presses Return; `auto_enter` can be disabled in settings.
+Hold the front button on the StickS3 to record. When you release it, the macOS menu bar app sends the audio to ASR, shows the recognized text, and pastes the final result into the currently focused input field after a short confirmation countdown. By default it pastes text without pressing Return; `auto_enter` can be enabled from the menu bar app or in the config file.
 
 ## Project Layout
 
@@ -20,8 +20,8 @@ Hold the front button on the StickS3 to record. When you release it, the macOS m
 - The macOS app only connects to paired `VS-XXXX` devices and can keep multiple paired devices connected at once. The menu bar app lists every paired device and shows whether each one is connected or still scanning.
 - The front button maps to the protocol `primary` role; it starts a recording session on press and ends it on release when the app has put the device in `ready`.
 - The firmware reads 16 kHz mono PCM from the ES8311 microphone, encodes it as Opus, and sends it over BLE notifications.
-- The macOS app wraps incoming Opus payloads into Ogg Opus and forwards them to ASR over WebSocket.
-- ASR providers can be direct Volcengine or VoiceStick Cloud relay.
+- The macOS app wraps incoming Opus payloads into Ogg Opus and can send them either to WebSocket ASR providers or to the native macOS Speech framework.
+- ASR providers can be Apple Speech, OpenAI-compatible speech-to-text, direct Volcengine, or the VoiceStick Cloud relay.
 - During recognition, the macOS app shows a floating overlay and menu bar status. The firmware display stays in the thinking state after button release until the text is pasted or cancelled.
 - Final text enters a 1.2 second confirmation countdown.
 - Pressing the front button during the countdown pauses auto-paste. Pressing the front button again confirms paste; pressing the side button cancels it.
@@ -57,7 +57,7 @@ The firmware reports raw button facts (`button_down` / `button_up` with
 `primary` or `secondary`). The macOS app owns the interaction state machine and
 sends `ui_state` updates back to the firmware for the screen.
 
-By default the paste flow presses Return after paste. Disable `Press Return after paste` in settings, or set `auto_enter = false` in the config file, to paste without sending Return.
+By default the paste flow does not press Return after paste. Enable `Press Return after paste` from the menu bar app, or set `auto_enter = true` in the config file, when you want VoiceStick to submit after dictation.
 
 ## Audio Path
 
@@ -65,7 +65,7 @@ By default the paste flow presses Return after paste. Disable `Press Return afte
 StickS3 mic -> ES8311/I2S PCM -> Opus -> BLE -> macOS -> Ogg Opus -> ASR -> paste
 ```
 
-The desktop app does not decode Opus back to PCM for ASR. It forwards Ogg Opus directly.
+For WebSocket providers, the desktop app forwards Ogg Opus directly. For Apple Speech, it decodes Opus locally and runs recognition through the macOS Speech framework.
 
 ## BLE Protocol Summary
 
@@ -145,7 +145,7 @@ SPARKLE_PUBLIC_ED_KEY="..." scripts/build-macos.sh --release
 scripts/make-dmg.sh
 ```
 
-The build script writes `build/VoiceStick-<version>.app`, `build/VoiceStick-<version>.zip`, and a Sparkle signature file. Upload the DMG and ZIP to GitHub Releases, then update `website/appcast.xml` for the GitHub Pages update feed.
+The build script writes `build/VoiceStick.app`, `build/VoiceStick-<version>.zip`, and a Sparkle signature file. Upload the DMG and ZIP to GitHub Releases, then update `website/appcast.xml` for the GitHub Pages update feed.
 
 For a distributable Windows release with WinSparkle updates, the MSI is the update package. The Windows signing certificate is expected to live on the local signing machine, such as a USB hardware key:
 
@@ -203,20 +203,22 @@ cp desktop/macos/Config/config.example.toml "$HOME/Library/Application Support/V
 Example:
 
 ```toml
-asr_provider = "volcengine"
+asr_provider = "apple_speech"
 voicestick_api_key = ""
 voicestick_cloud_url = "wss://api.xiaozhi.me/voicestick/asr/"
-volcengine_api_key = "your_volcengine_asr_api_key"
+volcengine_api_key = ""
 llm_base_url = "https://api.openai.com/v1"
-llm_api_key = "your_openai_compatible_llm_api_key"
+llm_api_key = ""
 llm_model = "gpt-5.5"
 interaction_mode = "hold_to_talk"
 resource_id = "volc.seedasr.sauc.duration"
+apple_speech_locale = "en_US"
 asr_hotwords = "小智,VoiceStick"
+asr_corrections = ""
 paired_device_ids = ""
 device_theme_colors = ""
 device_overlay_positions = ""
-auto_enter = true
+auto_enter = false
 debug_audio_cache = false
 # debug_audio_dir = "~/Library/Application Support/VoiceStick/DebugAudio"
 
@@ -235,7 +237,9 @@ Fields:
 
 | Field | Description |
 | --- | --- |
-| `asr_provider` | `volcengine` or `voicestick_cloud` |
+| `asr_provider` | `apple_speech`, `voicestick_cloud`, `volcengine`, or `openai` |
+| `apple_speech` | Native macOS Speech provider. No API key required; macOS Dictation must be enabled. |
+| `apple_speech_locale` | Apple Speech language/locale, for example `ru_RU`, `en_US`, or `kk_KZ` |
 | `volcengine_api_key` | Direct Volcengine API key, sent as `X-Api-Key` |
 | `voicestick_api_key` | VoiceStick Cloud relay API key, sent as `X-Api-Key` |
 | `voicestick_cloud_url` | Cloud relay WebSocket URL |
@@ -245,10 +249,11 @@ Fields:
 | `interaction_mode` | Front button interaction: `hold_to_talk` or `click_to_talk` |
 | `resource_id` | Volcengine resource ID |
 | `asr_hotwords` | Comma-separated ASR hotwords; also passed to the LLM as translation terminology hints |
+| `asr_corrections` | Optional personal corrections, for example `ноги=>логи,рок=>волк` |
 | `paired_device_ids` | Comma-separated 4-digit hex IDs, for example `C3D8,09AF` |
 | `device_theme_colors` | Optional per-device overlay colors, for example `C3D8:pink,09AF:green` |
 | `device_overlay_positions` | Optional per-device overlay positions, for example `C3D8:top_left,09AF:bottom_right` |
-| `auto_enter` | Whether to press Return after paste |
+| `auto_enter` | Whether to press Return after paste; defaults to `false` |
 | `debug_audio_cache` | Whether to save debug Ogg Opus files |
 | `debug_audio_dir` | Debug audio output directory |
 | `[output].target` | `focused_app` or `subtitle` |

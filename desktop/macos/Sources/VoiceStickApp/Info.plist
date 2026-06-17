@@ -29,8 +29,12 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>VoiceStick needs microphone access to capture speech for recognition.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>VoiceStick uses Bluetooth to connect to the VoiceStick microphone.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>VoiceStick uses Apple Speech recognition when you select the native macOS provider.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>

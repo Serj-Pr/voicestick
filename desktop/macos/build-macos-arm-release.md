@@ -8,7 +8,7 @@ It combines the release packaging path with the local-build conveniences from
 
 What it does:
 - builds only `arm64`
-- packages `build/VoiceStick-<version>.app`
+- packages `build/VoiceStick.app`
 - embeds `Sparkle.framework`
 - signs the app bundle
 - creates `build/VoiceStick-<version>.zip`
@@ -52,7 +52,7 @@ Notes:
 
 Что делает скрипт:
 - собирает только `arm64`
-- упаковывает `build/VoiceStick-<version>.app`
+- упаковывает `build/VoiceStick.app`
 - встраивает `Sparkle.framework`
 - подписывает app bundle
 - создаёт `build/VoiceStick-<version>.zip`

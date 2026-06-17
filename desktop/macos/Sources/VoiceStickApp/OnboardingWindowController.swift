@@ -44,8 +44,10 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
     private let apiKeyField = NSTextField()
     private let applyTrialAPIKeyButton = NSButton(title: "Apply Trial", target: nil, action: nil)
     private let resourcePopup = NSPopUpButton()
+    private let appleSpeechLocalePopup = NSPopUpButton()
     private let accessibilityStatusLabel = NSTextField(labelWithString: "")
     private let accessibilitySettingsButton = NSButton(title: "Open Accessibility Settings", target: nil, action: nil)
+    private let resetAccessibilityButton = NSButton(title: "Remove Old VoiceStick Permission", target: nil, action: nil)
 
     private var central: CBCentralManager?
     private var devices: [OnboardingDevice] = []
@@ -73,6 +75,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         window.delegate = self
         accessibilitySettingsButton.target = self
         accessibilitySettingsButton.action = #selector(requestAccessibilityPermission)
+        resetAccessibilityButton.target = self
+        resetAccessibilityButton.action = #selector(resetAccessibilityPermission)
         applyTrialAPIKeyButton.target = self
         applyTrialAPIKeyButton.action = #selector(applyTrialAPIKey)
         buildContent()
@@ -185,7 +189,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         providerPopup.addItems(withTitles: [
             ASRProvider.voiceStickCloud.displayName,
             ASRProvider.volcengine.displayName,
-            ASRProvider.openai.displayName
+            ASRProvider.openai.displayName,
+            ASRProvider.appleSpeech.displayName
         ])
         providerPopup.target = self
         providerPopup.action = #selector(providerSelectionChanged)
@@ -193,6 +198,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
 
         resourcePopup.addItems(withTitles: AppConfig.supportedResourceIDs)
         resourcePopup.selectItem(withTitle: config.resourceID)
+        configureAppleSpeechLocalePopup()
+        selectAppleSpeechLocale(config.appleSpeechLocale)
         apiKeyField.stringValue = apiKey(for: config.asrProvider)
     }
 
@@ -214,7 +221,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             contentStack.addArrangedSubview(providerView())
         case .accessibility:
             titleLabel.stringValue = "Allow text insertion"
-            detailLabel.stringValue = "VoiceStick pastes recognized text at your cursor, so macOS Accessibility permission is required."
+            detailLabel.stringValue = "VoiceStick pastes recognized text at your cursor, so macOS Accessibility permission is required. If an old VoiceStick is already listed, remove it first, then allow the current app."
             contentStack.addArrangedSubview(accessibilityView())
             updateAccessibilityStatus()
         case .finish:
@@ -276,12 +283,27 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         stack.alignment = .leading
         stack.spacing = 12
         stack.addArrangedSubview(row(label: "Provider", control: providerPopup))
-        stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
+        if selectedProvider() == .appleSpeech {
+            stack.addArrangedSubview(note("Apple Speech runs through macOS and does not need an API key."))
+            stack.addArrangedSubview(row(label: "Language", control: appleSpeechLocalePopup))
+        } else {
+            stack.addArrangedSubview(row(label: "API Key", control: apiKeyControl()))
+        }
         if selectedProvider() == .volcengine {
             stack.addArrangedSubview(row(label: "Resource ID", control: resourcePopup))
         }
         updateApplyTrialButton()
         return stack
+    }
+
+    private func note(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 12)
+        label.textColor = .secondaryLabelColor
+        label.maximumNumberOfLines = 0
+        label.lineBreakMode = .byWordWrapping
+        label.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        return label
     }
 
     private func apiKeyControl() -> NSStackView {
@@ -299,12 +321,22 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         return stack
     }
 
+    private func configureAppleSpeechLocalePopup() {
+        appleSpeechLocalePopup.removeAllItems()
+        for option in AppConfig.appleSpeechLocaleOptions {
+            appleSpeechLocalePopup.addItem(withTitle: option.title)
+            appleSpeechLocalePopup.lastItem?.representedObject = option.code
+        }
+    }
+
     private func accessibilityView() -> NSView {
         let stack = NSStackView()
         stack.orientation = .vertical
         stack.alignment = .leading
         stack.spacing = 12
         stack.addArrangedSubview(accessibilityStatusLabel)
+        stack.addArrangedSubview(note("If macOS shows an old VoiceStick entry, click Remove Old VoiceStick Permission, then enable the current VoiceStick.app in Accessibility."))
+        stack.addArrangedSubview(resetAccessibilityButton)
         stack.addArrangedSubview(accessibilitySettingsButton)
         return stack
     }
@@ -477,6 +509,31 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
         updateAccessibilityStatus()
     }
 
+    @objc private func resetAccessibilityPermission() {
+        let alert = NSAlert()
+        alert.messageText = "Remove Old VoiceStick Permission?"
+        alert.informativeText = """
+        This removes saved macOS Accessibility permission for VoiceStick. Use it when an old VoiceStick entry is stuck in the list and blocks the newly installed app.
+        """
+        alert.addButton(withTitle: "Remove Old Permission")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let bundleID = Bundle.main.bundleIdentifier ?? "app.voicestick.mac"
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+        task.arguments = ["reset", "Accessibility", bundleID]
+        do {
+            try task.run()
+            task.waitUntilExit()
+            statusLabel.stringValue = "Old Accessibility permission removed. Enable the current VoiceStick.app now."
+        } catch {
+            statusLabel.stringValue = "Could not remove old permission: \(error.localizedDescription)"
+        }
+        openAccessibilitySettings()
+        updateAccessibilityStatus()
+    }
+
     @objc private func applicationDidBecomeActive() {
         guard currentStep == .accessibility else { return }
         updateAccessibilityStatus()
@@ -577,7 +634,7 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             }
         case .provider:
             normalizeOpenAIKeyForTranslation()
-            if activeAPIKey().isEmpty {
+            if selectedProvider() != .appleSpeech && activeAPIKey().isEmpty {
                 statusLabel.stringValue = "Enter the API key for \(selectedProvider().displayName)."
                 return false
             }
@@ -631,6 +688,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return .volcengine
         case ASRProvider.openai.displayName:
             return .openai
+        case ASRProvider.appleSpeech.displayName:
+            return .appleSpeech
         default:
             return config.asrProvider
         }
@@ -644,6 +703,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return config.volcengineAPIKey
         case .openai:
             return config.llmAPIKey
+        case .appleSpeech:
+            return ""
         }
     }
 
@@ -655,6 +716,8 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             return config.volcengineAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         case .openai:
             return config.llmAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        case .appleSpeech:
+            return ""
         }
     }
 
@@ -667,10 +730,29 @@ final class OnboardingWindowController: NSWindowController, NSWindowDelegate, CB
             config.volcengineAPIKey = key
         case .openai:
             config.llmAPIKey = key
+        case .appleSpeech:
+            break
         }
         config.asrProvider = selectedProvider()
+        config.appleSpeechLocale = selectedAppleSpeechLocale()
         config.resourceID = resourcePopup.titleOfSelectedItem ?? config.resourceID
         normalizeOpenAIKeyForTranslation()
+    }
+
+    private func selectedAppleSpeechLocale() -> String {
+        (appleSpeechLocalePopup.selectedItem?.representedObject as? String) ?? AppConfig.defaults.appleSpeechLocale
+    }
+
+    private func selectAppleSpeechLocale(_ code: String) {
+        if let item = appleSpeechLocalePopup.itemArray.first(where: { ($0.representedObject as? String) == code }) {
+            appleSpeechLocalePopup.select(item)
+            return
+        }
+
+        let title = Locale.current.localizedString(forIdentifier: code) ?? code
+        appleSpeechLocalePopup.addItem(withTitle: "\(title) (\(code))")
+        appleSpeechLocalePopup.lastItem?.representedObject = code
+        appleSpeechLocalePopup.select(appleSpeechLocalePopup.lastItem)
     }
 
     private func syncOpenAIAPIKeyIfNeeded() {
